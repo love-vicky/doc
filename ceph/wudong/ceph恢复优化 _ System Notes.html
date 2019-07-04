@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<!-- saved from url=(0056)http://www.sysnote.org/2016/08/02/ceph-recover-optimize/ -->
+<html class="theme-next mist use-motion" lang="zh-Hans"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+
+
+
+
+
+
+<meta http-equiv="Cache-Control" content="no-transform">
+<meta http-equiv="Cache-Control" content="no-siteapp">
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+  
+  <link href="./ceph恢复优化 _ System Notes_files/jquery.fancybox.css" rel="stylesheet" type="text/css">
+
+
+
+
+  
+  
+  
+  
+
+  
+    
+    
+  
+
+  
+
+  
+
+  
+
+  
+
+  
+    
+    
+    <link href="./ceph恢复优化 _ System Notes_files/css" rel="stylesheet" type="text/css">
+  
+
+
+
+
+
+
+<link href="./ceph恢复优化 _ System Notes_files/font-awesome.min.css" rel="stylesheet" type="text/css">
+
+<link href="./ceph恢复优化 _ System Notes_files/main.css" rel="stylesheet" type="text/css">
+
+
+  <meta name="keywords" content="ceph,">
+
+
+
+
+
+  <link rel="alternate" href="http://www.sysnote.org/atom.xml" title="System Notes" type="application/atom+xml">
+
+
+
+
+  <link rel="shortcut icon" type="image/x-icon" href="http://www.sysnote.org/favicon.ico?v=5.1.1">
+
+
+
+
+
+
+<meta name="description" content="1.&amp;#x80CC;&amp;#x666F;&amp;#x5728;&amp;#x5BF9;ceph&amp;#x5757;&amp;#x5B58;&amp;#x50A8;&amp;#x8FDB;&amp;#x884C;&amp;#x6027;&amp;#x80FD;&amp;#x6D4B;&amp;#x8BD5;&amp;#x65F6;&amp;#x53D1;&amp;#x73B0;&amp;#xFF0C;&amp;#x5F53;&amp;#x6709;osd&amp;#x91CD;&amp;#x542F;&amp;#x6216;&amp;#x8005;&amp;#x5B58">
+<meta property="og:type" content="article">
+<meta property="og:title" content="ceph恢复优化">
+<meta property="og:url" content="http://yoursite.com/2016/08/02/ceph-recover-optimize/index.html">
+<meta property="og:site_name" content="System Notes">
+<meta property="og:description" content="1.&amp;#x80CC;&amp;#x666F;&amp;#x5728;&amp;#x5BF9;ceph&amp;#x5757;&amp;#x5B58;&amp;#x50A8;&amp;#x8FDB;&amp;#x884C;&amp;#x6027;&amp;#x80FD;&amp;#x6D4B;&amp;#x8BD5;&amp;#x65F6;&amp;#x53D1;&amp;#x73B0;&amp;#xFF0C;&amp;#x5F53;&amp;#x6709;osd&amp;#x91CD;&amp;#x542F;&amp;#x6216;&amp;#x8005;&amp;#x5B58">
+<meta property="og:image" content="http://yoursite.com/2016/08/02/ceph-recover-optimize/recover-whole.png">
+<meta property="og:image" content="http://yoursite.com/2016/08/02/ceph-recover-optimize/recover-delta.png">
+<meta property="og:image" content="http://yoursite.com/2016/08/02/ceph-recover-optimize/perf-before.png">
+<meta property="og:image" content="http://yoursite.com/2016/08/02/ceph-recover-optimize/perf-after.png">
+<meta property="og:updated_time" content="2016-08-02T11:55:50.718Z">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="ceph恢复优化">
+<meta name="twitter:description" content="1.&amp;#x80CC;&amp;#x666F;&amp;#x5728;&amp;#x5BF9;ceph&amp;#x5757;&amp;#x5B58;&amp;#x50A8;&amp;#x8FDB;&amp;#x884C;&amp;#x6027;&amp;#x80FD;&amp;#x6D4B;&amp;#x8BD5;&amp;#x65F6;&amp;#x53D1;&amp;#x73B0;&amp;#xFF0C;&amp;#x5F53;&amp;#x6709;osd&amp;#x91CD;&amp;#x542F;&amp;#x6216;&amp;#x8005;&amp;#x5B58">
+<meta name="twitter:image" content="http://yoursite.com/2016/08/02/ceph-recover-optimize/recover-whole.png">
+
+
+
+<script src="./ceph恢复优化 _ System Notes_files/hm.js.下载"></script><script type="text/javascript" id="hexo.configurations">
+  var NexT = window.NexT || {};
+  var CONFIG = {
+    root: '/',
+    scheme: 'Mist',
+    sidebar: {"position":"left","display":"post","offset":12,"offset_float":0,"b2t":false,"scrollpercent":false},
+    fancybox: true,
+    motion: true,
+    duoshuo: {
+      userId: '0',
+      author: '博主'
+    },
+    algolia: {
+      applicationID: '',
+      apiKey: '',
+      indexName: '',
+      hits: {"per_page":10},
+      labels: {"input_placeholder":"Search for Posts","hits_empty":"We didn't find any results for the search: ${query}","hits_stats":"${hits} results found in ${time} ms"}
+    }
+  };
+</script>
+
+
+
+  <link rel="canonical" href="http://yoursite.com/2016/08/02/ceph-recover-optimize/">
+
+
+
+
+
+  <title>ceph恢复优化 | System Notes</title>
+<style type="text/css">.fancybox-margin{margin-right:17px;}</style></head>
+
+<body itemscope="" itemtype="http://schema.org/WebPage" lang="zh-Hans" class="" style="padding-right: 320px;">
+
+  
+
+
+
+
+
+  <script type="text/javascript">
+    var _hmt = _hmt || [];
+    (function() {
+      var hm = document.createElement("script");
+      hm.src = "https://hm.baidu.com/hm.js?6958d5097bd406d16931b3fa137c6a9f";
+      var s = document.getElementsByTagName("script")[0];
+      s.parentNode.insertBefore(hm, s);
+    })();
+  </script>
+
+
+
+
+
+
+
+
+
+
+
+  
+  
+    
+  
+
+  <div class="container sidebar-position-left page-post-detail ">
+    <div class="headband"></div>
+
+    <header id="header" class="header" itemscope="" itemtype="http://schema.org/WPHeader">
+      <div class="header-inner"><div class="site-brand-wrapper">
+  <div class="site-meta ">
+    
+
+    <div class="custom-logo-site-title">
+      <a href="http://www.sysnote.org/" class="brand" rel="start" style="opacity: 1;">
+        <span class="logo-line-before"><i class="" style="transform: translateX(100%);"></i></span>
+        <span class="site-title" style="opacity: 1; top: 0px;">System Notes</span>
+        <span class="logo-line-after"><i class="" style="transform: translateX(-100%);"></i></span>
+      </a>
+    </div>
+      
+        <p class="site-subtitle" style="opacity: 1; top: 0px;"></p>
+      
+  </div>
+
+  <div class="site-nav-toggle">
+    <button>
+      <span class="btn-bar"></span>
+      <span class="btn-bar"></span>
+      <span class="btn-bar"></span>
+    </button>
+  </div>
+</div>
+
+<nav class="site-nav">
+  
+
+  
+    <ul id="menu" class="menu">
+      
+        
+        <li class="menu-item menu-item-home" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-home"></i> <br>
+            
+            首页
+          </a>
+        </li>
+      
+        
+        <li class="menu-item menu-item-categories" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/categories" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-th"></i> <br>
+            
+            分类
+          </a>
+        </li>
+      
+        
+        <li class="menu-item menu-item-about" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/about" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-user"></i> <br>
+            
+            关于
+          </a>
+        </li>
+      
+        
+        <li class="menu-item menu-item-archives" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/archives" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-archive"></i> <br>
+            
+            归档
+          </a>
+        </li>
+      
+        
+        <li class="menu-item menu-item-tags" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/tags" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-tags"></i> <br>
+            
+            标签
+          </a>
+        </li>
+      
+
+      
+    </ul>
+  
+
+  
+</nav>
+
+
+
+ </div>
+    </header>
+
+    <main id="main" class="main">
+      <div class="main-inner">
+        <div class="content-wrap">
+          <div id="content" class="content">
+            
+
+  <div id="posts" class="posts-expand">
+    
+
+  
+
+  
+  
+  
+
+  <article class="post post-type-normal" itemscope="" itemtype="http://schema.org/Article" style="opacity: 1; display: block; transform: translateY(0px);">
+    <link itemprop="mainEntityOfPage" href="http://yoursite.com/2016/08/02/ceph-recover-optimize/">
+
+    <span hidden="" itemprop="author" itemscope="" itemtype="http://schema.org/Person">
+      <meta itemprop="name" content="Wu Dong">
+      <meta itemprop="description" content="">
+      <meta itemprop="image" content="/images/avatar.png">
+    </span>
+
+    <span hidden="" itemprop="publisher" itemscope="" itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="System Notes">
+    </span>
+
+    
+      <header class="post-header">
+
+        
+        
+          <h1 class="post-title" itemprop="name headline">ceph恢复优化</h1>
+        
+
+        <div class="post-meta">
+          <span class="post-time">
+            
+              <span class="post-meta-item-icon">
+                <i class="fa fa-calendar-o"></i>
+              </span>
+              
+                <span class="post-meta-item-text">发表于</span>
+              
+              <time title="创建于" itemprop="dateCreated datePublished" datetime="2016-08-02T19:46:23+08:00">
+                2016-08-02
+              </time>
+            
+
+            
+
+            
+          </span>
+
+          
+            <span class="post-category">
+            
+              <span class="post-meta-divider">|</span>
+            
+              <span class="post-meta-item-icon">
+                <i class="fa fa-folder-o"></i>
+              </span>
+              
+                <span class="post-meta-item-text">分类于</span>
+              
+              
+                <span itemprop="about" itemscope="" itemtype="http://schema.org/Thing">
+                  <a href="http://www.sysnote.org/categories/ceph/" itemprop="url" rel="index">
+                    <span itemprop="name">ceph</span>
+                  </a>
+                </span>
+
+                
+                
+              
+            </span>
+          
+
+          
+            
+          
+
+          
+          
+
+          
+            <span class="post-meta-divider">|</span>
+            <span class="page-pv"><i class="fa fa-file-o"></i>
+            <span class="busuanzi-value" id="busuanzi_value_page_pv"></span>
+            </span>
+          
+
+          
+
+          
+
+        </div>
+      </header>
+    
+
+    <div class="post-body" itemprop="articleBody">
+
+      
+      
+
+      
+        <h1 id="1-背景"><a href="http://www.sysnote.org/2016/08/02/ceph-recover-optimize/#1-%E8%83%8C%E6%99%AF" class="headerlink" title="1.背景"></a>1.背景</h1><p>在对ceph块存储进行性能测试时发现，当有osd重启或者存储机重启时，I/O性能会急剧下降，尤其在随机写的负载下，下降幅度达到90%，并且会持续一段时候才慢慢恢复到正常水平。一开始我们也尝试将恢复相关的参数调低（osd_recovery_max_active=1、osd_recovery_max_chunk=131072、osd_max_backfills=1），以及调整正常I/O和恢复I/O的优先级（osd_recovery_op_priority=10、osd_client_op_priority=63），但是测试结果来看，这些参数的调整没有多大的效果，随机写负载下性能下降仍然很大。</p>
+<h1 id="2-原因分析"><a href="http://www.sysnote.org/2016/08/02/ceph-recover-optimize/#2-%E5%8E%9F%E5%9B%A0%E5%88%86%E6%9E%90" class="headerlink" title="2.原因分析"></a>2.原因分析</h1><p>在《ceph基于pglog的一致性协议》一文中分析了ceph的一致性协议，从中我们得知在osd重启、存储机重启等场景下基于pglog的恢复的时候，在peering的时候会根据pglog来构建出missing列表，然后在恢复时根据missing列表逐个进行恢复，恢复的粒度是整个对象大小（默认4MB，有可能有的对象不足4MB，就按对象大小），即使只修改了一个4KB，也需要将4MB的对象拷贝过来，这样100个io就会达到400MB的带宽，对网络及磁盘产生较大的影响。当写io命中正在修复的对象时，也是先修复原来4MB的对象，即需要将4MB的数据通过网络拷贝过来，延迟就会增加很多，然后再写入数据，对于随机写的场景尤其严重，基本都是命中的情况，带来相当大的延迟，从而iops下降（下降幅度80%~90%）。这个影响时间取决于上层的业务量和osd停服的时间。<br><a href="./ceph恢复优化 _ System Notes_files/recover-whole.png" class="fancybox fancybox.image" rel="group"><img src="./ceph恢复优化 _ System Notes_files/recover-whole.png" alt="ceph-recover-optimize"></a><br><a id="more"></a></p>
+<h1 id="3-恢复优化"><a href="http://www.sysnote.org/2016/08/02/ceph-recover-optimize/#3-%E6%81%A2%E5%A4%8D%E4%BC%98%E5%8C%96" class="headerlink" title="3.恢复优化"></a>3.恢复优化</h1><p>因为pglog里每条记录里只是记了操作及版本等信息，并没有记录这次操作是修改哪部分数据，所以优化的办法就是在pglog里记录每次操作修改的区间，记为[offset,len]（实现时pglog结构里引入dirty_extents来表示），正常写I/O处理时，会写pglog，对应的是一个MODIFY操作，在这条记录里记上修改的区间。</p>
+<p>当一个osd故障重启后，进行peering的时候，合并pglog来构建missing列表时就可以将同一个对象的多次修改的[offset,len]求一个并集，得出故障期间总的修改区间，然后在恢复的时候就能够根据这个范围来恢复这部分增量数据，从而大幅度减少了恢复时的网络和磁盘带宽，以及正常I/O命中恢复对象的等待时间，从而大幅降低对正常I/O的性能影响（尤其是对于随机写I/O的场景）。<br><a href="./ceph恢复优化 _ System Notes_files/recover-delta.png" class="fancybox fancybox.image" rel="group"><img src="./ceph恢复优化 _ System Notes_files/recover-delta.png" alt="ceph-recover-optimize"></a></p>
+<p>针对我们使用的块存储的应用场景，为了减小实现的复杂度，引入一个标记can_recover_partial来表示是否可以进行部分恢复，默认是false，当进行写I/O的处理时记录pglog里的[offset,len]，并且标记can_recover_partial为true，然后恢复时就可以根据这个标记只恢复对象内的增量数据。对于无法判断是否可以进行部分优化时，就回退到原有的恢复逻辑去恢复整个对象，需要考虑几种情况，包括：truncate、omap、clone、EC等。</p>
+<p><strong>truncate</strong><br>truncate的操作对应的就是截断对象，可以类比于文件系统里的ftruncate的操作（可以将文件截断，或者将文件扩大）。原生ceph的pglog没有TRUNCATE的操作码，它里面的truncate操作都是MODIFY操作，如果一个对象先被修改了，然后又被truncate了，那么在恢复这个对象的时候仍然是按照这整个对象来恢复，有可能因为truncate这个对象变小了（小于4MB），这个不用管， 直接将这个对象读出来拷贝过去就行了。<br>但是我们要在pglog里加入[offset, len]来表示修改范围，那么和truncate混在一起后，就需要做区分，为了简单起见，当碰到truncate操作时，将can_recover_partial设置成false，这样truncate的处理就跟原来一样，在我们的使用场景下，trucate操作不常见。</p>
+<p><strong>omap</strong><br>omap即objectmap，用来记录对象的扩展属性，因为文件系统的xatrr属性数量及长度都有限制，超过了就需要放到omap中。设置omap属性时，对应到pglog里也是一个MODIFY操作，也就是说omap在多副本间的一 致性也是由pglog来保证的。在恢复的时候合并pglog来构建missing对象时，是不区分属性还是数据，都认为是对这个对象的修改，在恢复的时候都是先恢复恢复属性（xatrr和omap），然后再恢复数据。这样的话，即使一个对象在pglog里只设置了属性，在恢复的时候会连数据一起恢复过来，也即是多了一次数据的拷贝。在块存储的场景下，这个代价是可以接受的，因此不必针对omap做特殊处理。</p>
+<p><strong>clone</strong><br>这里的clone指的clone对象操作，就是做了快照之后对原卷进行写入时触发的cow操作。每次clone操作会在pglog里记录一条CLONE的记录，然后在filestore里会根据这个CLONE操作进行clone_range的处理，也就是从原来的head对象（表示卷的数据对象），拷贝数据到新生成的snap对象（即快照的对象）。在peering的时候合并pglog时，没有区分MODIFY和CLONE的，都会构建丢失对象放到missing列表里，也就是说这个missing列表里有可能既包含head对象，也包含snap对象。<br>在《ceph rbd快照原理解析》里详细介绍了快照的实现及故障恢复的处理，引入恢复优化后，对于snap对象还是按照原来的逻辑处理，而对于head对象就要做不同处理，按照对象的修改区间来进行恢复。</p>
+<p><strong>EC</strong><br>块存储下都是采用多副本的策略，而不会用到纠删码（EC），一般是ceph对象存储里才用到纠删码，因此我们不考虑这种情况，遇到纠删码相关的就就按照原有的逻辑进行恢复。</p>
+<h1 id="4-优化效果"><a href="http://www.sysnote.org/2016/08/02/ceph-recover-optimize/#4-%E4%BC%98%E5%8C%96%E6%95%88%E6%9E%9C" class="headerlink" title="4.优化效果"></a>4.优化效果</h1><p>下面的测试结果对比了优化前和优化后的性能（主要针对随机读写的场景），从结果上来看，效果显著：<br>1）减少了重启osd过程中对集群正常存储I/O性能影响，从优化前的I/O性能下降90%到优化后I/O性能只下降10%；<br><br>2）缩短重启恢复所需要的时间，重启单个osd的恢复时间从10分钟减少到40秒左右；</p>
+<p><a href="./ceph恢复优化 _ System Notes_files/perf-before.png" class="fancybox fancybox.image" rel="group"><img src="./ceph恢复优化 _ System Notes_files/perf-before.png" alt="ceph-recover-optimize"></a><br><a href="./ceph恢复优化 _ System Notes_files/perf-after.png" class="fancybox fancybox.image" rel="group"><img src="./ceph恢复优化 _ System Notes_files/perf-after.png" alt="ceph-recover-optimize"></a></p>
+
+      
+    </div>
+
+    <div>
+      
+        
+
+      
+    </div>
+
+    <div>
+      
+        
+
+      
+    </div>
+
+    <div>
+      
+        
+
+      
+    </div>
+
+    <footer class="post-footer">
+      
+        <div class="post-tags">
+          
+            <a href="http://www.sysnote.org/tags/ceph/" rel="tag"># ceph</a>
+          
+        </div>
+      
+
+      
+        
+      
+
+      
+        <div class="post-nav">
+          <div class="post-nav-next post-nav-item">
+            
+              <a href="http://www.sysnote.org/2016/02/28/ceph-rbd-snap/" rel="next" title="ceph rbd快照原理解析">
+                <i class="fa fa-chevron-left"></i> ceph rbd快照原理解析
+              </a>
+            
+          </div>
+
+          <span class="post-nav-divider"></span>
+
+          <div class="post-nav-prev post-nav-item">
+            
+              <a href="http://www.sysnote.org/2016/08/19/ceph-bluestore/" rel="prev" title="ceph存储引擎bluestore解析">
+                ceph存储引擎bluestore解析 <i class="fa fa-chevron-right"></i>
+              </a>
+            
+          </div>
+        </div>
+      
+
+      
+      
+    </footer>
+  </article>
+
+
+
+    <div class="post-spread">
+      
+    </div>
+  </div>
+
+
+          </div>
+          
+
+
+          
+  <div class="comments" id="comments">
+    
+      <div id="uyan_frame"></div>
+    
+  </div>
+
+
+        </div>
+        
+          
+  
+  <div class="sidebar-toggle">
+    <div class="sidebar-toggle-line-wrap">
+      <span class="sidebar-toggle-line sidebar-toggle-line-first" style="top: 5px; transform: rotateZ(-45deg); width: 100%; opacity: 1; left: 0px;"></span>
+      <span class="sidebar-toggle-line sidebar-toggle-line-middle" style="opacity: 0; width: 100%; left: 0px; top: 0px; transform: rotateZ(0deg);"></span>
+      <span class="sidebar-toggle-line sidebar-toggle-line-last" style="top: -5px; transform: rotateZ(45deg); width: 100%; opacity: 1; left: 0px;"></span>
+    </div>
+  </div>
+
+  <aside id="sidebar" class="sidebar sidebar-active" style="display: block; width: 320px;">
+    <div class="sidebar-inner">
+
+      
+
+      
+        <ul class="sidebar-nav motion-element" style="opacity: 1; display: block; transform: translateX(0px);">
+          <li class="sidebar-nav-toc sidebar-nav-active" data-target="post-toc-wrap">
+            文章目录
+          </li>
+          <li class="sidebar-nav-overview" data-target="site-overview">
+            站点概览
+          </li>
+        </ul>
+      
+
+      <section class="site-overview sidebar-panel">
+        <div class="site-author motion-element" itemprop="author" itemscope="" itemtype="http://schema.org/Person" style="opacity: 1; display: block; transform: translateX(0px);">
+          <img class="site-author-image" itemprop="image" src="./ceph恢复优化 _ System Notes_files/avatar.png" alt="Wu Dong">
+          <p class="site-author-name" itemprop="name">Wu Dong</p>
+           
+              <p class="site-description motion-element" itemprop="description" style="opacity: 1; display: block; transform: translateX(0px);">Diary Notebook</p>
+          
+        </div>
+        <nav class="site-state motion-element" style="opacity: 1; display: block; transform: translateX(0px);">
+
+          
+            <div class="site-state-item site-state-posts">
+              <a href="http://www.sysnote.org/archives">
+                <span class="site-state-item-count">32</span>
+                <span class="site-state-item-name">日志</span>
+              </a>
+            </div>
+          
+
+          
+            
+            
+            <div class="site-state-item site-state-categories">
+              <a href="http://www.sysnote.org/categories/index.html">
+                <span class="site-state-item-count">6</span>
+                <span class="site-state-item-name">分类</span>
+              </a>
+            </div>
+          
+
+          
+            
+            
+            <div class="site-state-item site-state-tags">
+              <a href="http://www.sysnote.org/tags/index.html">
+                <span class="site-state-item-count">27</span>
+                <span class="site-state-item-name">标签</span>
+              </a>
+            </div>
+          
+
+        </nav>
+
+        
+          <div class="feed-link motion-element" style="opacity: 1; display: block; transform: translateX(0px);">
+            <a href="http://www.sysnote.org/atom.xml" rel="alternate">
+              <i class="fa fa-rss"></i>
+              RSS
+            </a>
+          </div>
+        
+
+        <div class="links-of-author motion-element" style="opacity: 1; display: block; transform: translateX(0px);">
+          
+        </div>
+
+        
+        
+
+        
+        
+
+        
+
+
+      </section>
+
+      
+      <!--noindex-->
+        <section class="post-toc-wrap motion-element sidebar-panel sidebar-panel-active" style="opacity: 1; display: block; transform: translateX(0px);">
+          <div class="post-toc" style="max-height: 788px; width: calc(100% + 17px);">
+
+            
+              
+            
+
+            
+              <div class="post-toc-content"><ol class="nav"><li class="nav-item nav-level-1"><a class="nav-link" href="http://www.sysnote.org/2016/08/02/ceph-recover-optimize/#1-%E8%83%8C%E6%99%AF"><span class="nav-number">1.</span> <span class="nav-text">1.背景</span></a></li><li class="nav-item nav-level-1"><a class="nav-link" href="http://www.sysnote.org/2016/08/02/ceph-recover-optimize/#2-%E5%8E%9F%E5%9B%A0%E5%88%86%E6%9E%90"><span class="nav-number">2.</span> <span class="nav-text">2.原因分析</span></a></li><li class="nav-item nav-level-1"><a class="nav-link" href="http://www.sysnote.org/2016/08/02/ceph-recover-optimize/#3-%E6%81%A2%E5%A4%8D%E4%BC%98%E5%8C%96"><span class="nav-number">3.</span> <span class="nav-text">3.恢复优化</span></a></li><li class="nav-item nav-level-1"><a class="nav-link" href="http://www.sysnote.org/2016/08/02/ceph-recover-optimize/#4-%E4%BC%98%E5%8C%96%E6%95%88%E6%9E%9C"><span class="nav-number">4.</span> <span class="nav-text">4.优化效果</span></a></li></ol></div>
+            
+
+          </div>
+        </section>
+      <!--/noindex-->
+      
+
+      
+
+    </div>
+  </aside>
+
+
+        
+      </div>
+    </main>
+
+    <footer id="footer" class="footer">
+      <div class="footer-inner">
+        <div class="copyright">
+  
+  © 
+  <span itemprop="copyrightYear">2017</span>
+  <span class="with-love">
+    <i class="fa fa-heart"></i>
+  </span>
+  <span class="author" itemprop="copyrightHolder">Wu Dong</span>
+</div>
+
+
+<div class="powered-by">
+  由 <a class="theme-link" href="https://hexo.io/">Hexo</a> 强力驱动
+</div>
+
+<div class="theme-info">
+  主题 -
+  <a class="theme-link" href="https://github.com/iissnan/hexo-theme-next">
+    NexT.Mist
+  </a>
+</div>
+
+
+        
+<div class="busuanzi-count">
+  <script async="" src="./ceph恢复优化 _ System Notes_files/busuanzi.pure.mini.js.下载"></script>
+
+  
+    <span class="site-uv">
+      <i class="fa fa-user"></i>
+      <span class="busuanzi-value" id="busuanzi_value_site_uv"></span>
+      
+    </span>
+  
+
+  
+    <span class="site-pv">
+      <i class="fa fa-eye"></i>
+      <span class="busuanzi-value" id="busuanzi_value_site_pv"></span>
+      
+    </span>
+  
+</div>
+
+
+        
+      </div>
+    </footer>
+
+    
+      <div class="back-to-top">
+        <i class="fa fa-arrow-up"></i>
+        
+      </div>
+    
+
+  </div>
+
+  
+
+<script type="text/javascript">
+  if (Object.prototype.toString.call(window.Promise) !== '[object Function]') {
+    window.Promise = null;
+  }
+</script>
+
+
+
+
+
+
+
+
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+  
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/index.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/fastclick.min.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/jquery.lazyload.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/velocity.min.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/velocity.ui.min.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/jquery.fancybox.pack.js.下载"></script>
+
+
+  
+
+
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/utils.js.下载"></script>
+
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/motion.js.下载"></script>
+
+
+
+  
+  
+
+  
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/scrollspy.js.下载"></script>
+<script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/post-details.js.下载"></script>
+
+
+
+  
+
+
+  <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/bootstrap.js.下载"></script>
+
+
+
+  
+
+
+  
+
+
+
+
+	
+
+
+
+
+
+  
+
+
+
+
+
+  
+    
+
+    
+      <!-- UY BEGIN -->
+      <script type="text/javascript" src="./ceph恢复优化 _ System Notes_files/uyan.js.下载"></script>
+      <!-- UY END -->
+    
+  
+
+
+
+
+
+  
+
+
+
+
+
+
+  
+
+
+
+
+
+  
+
+  
+
+  
+
+  
+
+  
+
+
+
+</body></html>

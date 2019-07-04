@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<!-- saved from url=(0051)http://www.sysnote.org/2016/02/15/ceph-consistency/ -->
+<html class="theme-next mist use-motion" lang="zh-Hans"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+
+
+
+
+
+
+<meta http-equiv="Cache-Control" content="no-transform">
+<meta http-equiv="Cache-Control" content="no-siteapp">
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+  
+  <link href="./ceph基于pglog的一致性协议 _ System Notes_files/jquery.fancybox.css" rel="stylesheet" type="text/css">
+
+
+
+
+  
+  
+  
+  
+
+  
+    
+    
+  
+
+  
+
+  
+
+  
+
+  
+
+  
+    
+    
+    <link href="./ceph基于pglog的一致性协议 _ System Notes_files/css" rel="stylesheet" type="text/css">
+  
+
+
+
+
+
+
+<link href="./ceph基于pglog的一致性协议 _ System Notes_files/font-awesome.min.css" rel="stylesheet" type="text/css">
+
+<link href="./ceph基于pglog的一致性协议 _ System Notes_files/main.css" rel="stylesheet" type="text/css">
+
+
+  <meta name="keywords" content="ceph,pglog,consistency,">
+
+
+
+
+
+  <link rel="alternate" href="http://www.sysnote.org/atom.xml" title="System Notes" type="application/atom+xml">
+
+
+
+
+  <link rel="shortcut icon" type="image/x-icon" href="http://www.sysnote.org/favicon.ico?v=5.1.1">
+
+
+
+
+
+
+<meta name="description" content="&amp;#x5206;&amp;#x5E03;&amp;#x5F0F;&amp;#x5B58;&amp;#x50A8;&amp;#x7CFB;&amp;#x7EDF;&amp;#x901A;&amp;#x5E38;&amp;#x91C7;&amp;#x7528;&amp;#x591A;&amp;#x526F;&amp;#x672C;&amp;#x7684;&amp;#x65B9;&amp;#x5F0F;&amp;#x6765;&amp;#x4FDD;&amp;#x8BC1;&amp;#x7CFB;&amp;#x7EDF;&amp;#x7684;&amp;#x53EF;&amp;#x9760;">
+<meta property="og:type" content="article">
+<meta property="og:title" content="ceph基于pglog的一致性协议">
+<meta property="og:url" content="http://yoursite.com/2016/02/15/ceph-consistency/index.html">
+<meta property="og:site_name" content="System Notes">
+<meta property="og:description" content="&amp;#x5206;&amp;#x5E03;&amp;#x5F0F;&amp;#x5B58;&amp;#x50A8;&amp;#x7CFB;&amp;#x7EDF;&amp;#x901A;&amp;#x5E38;&amp;#x91C7;&amp;#x7528;&amp;#x591A;&amp;#x526F;&amp;#x672C;&amp;#x7684;&amp;#x65B9;&amp;#x5F0F;&amp;#x6765;&amp;#x4FDD;&amp;#x8BC1;&amp;#x7CFB;&amp;#x7EDF;&amp;#x7684;&amp;#x53EF;&amp;#x9760;">
+<meta property="og:image" content="http://yoursite.com/2016/02/15/ceph-consistency/pglog-entry.png">
+<meta property="og:image" content="http://yoursite.com/2016/02/15/ceph-consistency/recover-primary.png">
+<meta property="og:image" content="http://yoursite.com/2016/02/15/ceph-consistency/recover-replica.png">
+<meta property="og:updated_time" content="2016-05-13T08:59:05.675Z">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="ceph基于pglog的一致性协议">
+<meta name="twitter:description" content="&amp;#x5206;&amp;#x5E03;&amp;#x5F0F;&amp;#x5B58;&amp;#x50A8;&amp;#x7CFB;&amp;#x7EDF;&amp;#x901A;&amp;#x5E38;&amp;#x91C7;&amp;#x7528;&amp;#x591A;&amp;#x526F;&amp;#x672C;&amp;#x7684;&amp;#x65B9;&amp;#x5F0F;&amp;#x6765;&amp;#x4FDD;&amp;#x8BC1;&amp;#x7CFB;&amp;#x7EDF;&amp;#x7684;&amp;#x53EF;&amp;#x9760;">
+<meta name="twitter:image" content="http://yoursite.com/2016/02/15/ceph-consistency/pglog-entry.png">
+
+
+
+<script src="./ceph基于pglog的一致性协议 _ System Notes_files/hm.js.下载"></script><script type="text/javascript" id="hexo.configurations">
+  var NexT = window.NexT || {};
+  var CONFIG = {
+    root: '/',
+    scheme: 'Mist',
+    sidebar: {"position":"left","display":"post","offset":12,"offset_float":0,"b2t":false,"scrollpercent":false},
+    fancybox: true,
+    motion: true,
+    duoshuo: {
+      userId: '0',
+      author: '博主'
+    },
+    algolia: {
+      applicationID: '',
+      apiKey: '',
+      indexName: '',
+      hits: {"per_page":10},
+      labels: {"input_placeholder":"Search for Posts","hits_empty":"We didn't find any results for the search: ${query}","hits_stats":"${hits} results found in ${time} ms"}
+    }
+  };
+</script>
+
+
+
+  <link rel="canonical" href="http://yoursite.com/2016/02/15/ceph-consistency/">
+
+
+
+
+
+  <title>ceph基于pglog的一致性协议 | System Notes</title>
+<style type="text/css">.fancybox-margin{margin-right:17px;}</style></head>
+
+<body itemscope="" itemtype="http://schema.org/WebPage" lang="zh-Hans" class="" style="padding-right: 320px;">
+
+  
+
+
+
+
+
+  <script type="text/javascript">
+    var _hmt = _hmt || [];
+    (function() {
+      var hm = document.createElement("script");
+      hm.src = "https://hm.baidu.com/hm.js?6958d5097bd406d16931b3fa137c6a9f";
+      var s = document.getElementsByTagName("script")[0];
+      s.parentNode.insertBefore(hm, s);
+    })();
+  </script>
+
+
+
+
+
+
+
+
+
+
+
+  
+  
+    
+  
+
+  <div class="container sidebar-position-left page-post-detail ">
+    <div class="headband"></div>
+
+    <header id="header" class="header" itemscope="" itemtype="http://schema.org/WPHeader">
+      <div class="header-inner"><div class="site-brand-wrapper">
+  <div class="site-meta ">
+    
+
+    <div class="custom-logo-site-title">
+      <a href="http://www.sysnote.org/" class="brand" rel="start" style="opacity: 1;">
+        <span class="logo-line-before"><i class="" style="transform: translateX(100%);"></i></span>
+        <span class="site-title" style="opacity: 1; top: 0px;">System Notes</span>
+        <span class="logo-line-after"><i class="" style="transform: translateX(-100%);"></i></span>
+      </a>
+    </div>
+      
+        <p class="site-subtitle" style="opacity: 1; top: 0px;"></p>
+      
+  </div>
+
+  <div class="site-nav-toggle">
+    <button>
+      <span class="btn-bar"></span>
+      <span class="btn-bar"></span>
+      <span class="btn-bar"></span>
+    </button>
+  </div>
+</div>
+
+<nav class="site-nav">
+  
+
+  
+    <ul id="menu" class="menu">
+      
+        
+        <li class="menu-item menu-item-home" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-home"></i> <br>
+            
+            首页
+          </a>
+        </li>
+      
+        
+        <li class="menu-item menu-item-categories" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/categories" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-th"></i> <br>
+            
+            分类
+          </a>
+        </li>
+      
+        
+        <li class="menu-item menu-item-about" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/about" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-user"></i> <br>
+            
+            关于
+          </a>
+        </li>
+      
+        
+        <li class="menu-item menu-item-archives" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/archives" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-archive"></i> <br>
+            
+            归档
+          </a>
+        </li>
+      
+        
+        <li class="menu-item menu-item-tags" style="opacity: 1; transform: translateY(0px);">
+          <a href="http://www.sysnote.org/tags" rel="section">
+            
+              <i class="menu-item-icon fa fa-fw fa-tags"></i> <br>
+            
+            标签
+          </a>
+        </li>
+      
+
+      
+    </ul>
+  
+
+  
+</nav>
+
+
+
+ </div>
+    </header>
+
+    <main id="main" class="main">
+      <div class="main-inner">
+        <div class="content-wrap">
+          <div id="content" class="content">
+            
+
+  <div id="posts" class="posts-expand">
+    
+
+  
+
+  
+  
+  
+
+  <article class="post post-type-normal" itemscope="" itemtype="http://schema.org/Article" style="opacity: 1; display: block; transform: translateY(0px);">
+    <link itemprop="mainEntityOfPage" href="http://yoursite.com/2016/02/15/ceph-consistency/">
+
+    <span hidden="" itemprop="author" itemscope="" itemtype="http://schema.org/Person">
+      <meta itemprop="name" content="Wu Dong">
+      <meta itemprop="description" content="">
+      <meta itemprop="image" content="/images/avatar.png">
+    </span>
+
+    <span hidden="" itemprop="publisher" itemscope="" itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="System Notes">
+    </span>
+
+    
+      <header class="post-header">
+
+        
+        
+          <h1 class="post-title" itemprop="name headline">ceph基于pglog的一致性协议</h1>
+        
+
+        <div class="post-meta">
+          <span class="post-time">
+            
+              <span class="post-meta-item-icon">
+                <i class="fa fa-calendar-o"></i>
+              </span>
+              
+                <span class="post-meta-item-text">发表于</span>
+              
+              <time title="创建于" itemprop="dateCreated datePublished" datetime="2016-02-15T16:30:31+08:00">
+                2016-02-15
+              </time>
+            
+
+            
+
+            
+          </span>
+
+          
+            <span class="post-category">
+            
+              <span class="post-meta-divider">|</span>
+            
+              <span class="post-meta-item-icon">
+                <i class="fa fa-folder-o"></i>
+              </span>
+              
+                <span class="post-meta-item-text">分类于</span>
+              
+              
+                <span itemprop="about" itemscope="" itemtype="http://schema.org/Thing">
+                  <a href="http://www.sysnote.org/categories/ceph/" itemprop="url" rel="index">
+                    <span itemprop="name">ceph</span>
+                  </a>
+                </span>
+
+                
+                
+              
+            </span>
+          
+
+          
+            
+          
+
+          
+          
+
+          
+            <span class="post-meta-divider">|</span>
+            <span class="page-pv"><i class="fa fa-file-o"></i>
+            <span class="busuanzi-value" id="busuanzi_value_page_pv"></span>
+            </span>
+          
+
+          
+
+          
+
+        </div>
+      </header>
+    
+
+    <div class="post-body" itemprop="articleBody">
+
+      
+      
+
+      
+        <p>分布式存储系统通常采用多副本的方式来保证系统的可靠性，而多副本之间如何保证数据的一致性就是系统的核心。ceph号称统一存储，其核心RADOS既支持多副本，也支持纠删码。本文主要分析ceph的多副本一致性协议。</p>
+<h1 id="1-pglog及读写流程"><a href="http://www.sysnote.org/2016/02/15/ceph-consistency/#1-pglog%E5%8F%8A%E8%AF%BB%E5%86%99%E6%B5%81%E7%A8%8B" class="headerlink" title="1.pglog及读写流程"></a>1.pglog及读写流程</h1><p>ceph使用pglog来保证多副本之间的一致性，pglog的示意图如下：pglog主要是用来记录做了什么操作，比如修改，删除等，而每一条记录里包含了对象信息，还有版本。<br>ceph使用版本控制的方式来标记一个PG内的每一次更新，每个版本包括一个(epoch，version)来组成：其中epoch是osdmap的版本，每当有OSD状态变化如增加删除等时，epoch就递增；version是PG内每次更新操作的版本号，递增的，由PG内的Primary OSD进行分配的。<br><a href="./ceph基于pglog的一致性协议 _ System Notes_files/pglog-entry.png" class="fancybox fancybox.image" rel="group"><img src="./ceph基于pglog的一致性协议 _ System Notes_files/pglog-entry.png" alt="pglog-entry"></a><br>每个副本上都维护了pglog，pglog里最重要的两个指针就是last_complete和last_update，正常情况下，每个副本上这两个指针都指向同一个位置，当出现机器重启、网络中断等故障时，故障副本的这两个指针就会有所区别，以便于来记录副本间的差异。</p>
+<p>为了便于说明ceph的一致性协议，先简要描述一下ceph的读写处理流程。<br>写处理流程：<br>1）client把写请求发到Primary OSD上，Primary OSD上将写请求序列化到一个事务中（在内存里），然后构造一条pglog记录，也序列化到这个事务中，然后将这个事务以directIO的方式异步写入journal，同时Primary OSD把写请求和pglog(pglog_entry是由primary生成)发送到Replicas上；<br>2）在Primary OSD将事务写到journal上后，会通过一系列的线程和回调处理，然后将这个事务里的数据写入filesystem（只是写到文件系统的缓存里，会有线程定期刷数据），这个事务里的pglog记录（也包括pginfo的last_complete和last_update）会写到leveldb，还有一些扩展属性相关的也在这个事务里，在遍历这个事务时也会写到leveldb；<br>3）在Replicas上，也是进行类似于Primary的动作，先写journal，写成功会给Primary发送一个committed ack，然后将这个事务里的数据写到filesystem，pglog与pginfo写到leveldb里，写完后会给Primary发送另外一个applied ack；<br>4）Primary在自己完成journal的写入时，以及在收到Replica的committed ack时都会检查是否多个副本都写入journal成功了，如果是则向client端发送ack通知写完成；Primary在自己完成事务写到文件系统和leveldb后，以及在收到replica的applied ack时都会检查是否多个副本都写文件系统成功，如果是则向client端发送ack通知数据可读；<br>对读流程来说，就比较简单，都是由Primary来处理，这里就不多说了。<br><a id="more"></a></p>
+<h1 id="2-故障恢复"><a href="http://www.sysnote.org/2016/02/15/ceph-consistency/#2-%E6%95%85%E9%9A%9C%E6%81%A2%E5%A4%8D" class="headerlink" title="2.故障恢复"></a>2.故障恢复</h1><p>ceph在进行故障恢复的时候会经过peering的过程，简要来说，peering就是对比各个副本上的pglog，然后根据副本上pglog的差异来构造missing列表，然后在恢复阶段就可以根据missing列表来进行恢复了。peering是按照pg为单位进行的，在进行peering的过程中，I/O请求是会挂起的，当进行完peering阶段进入recovery阶段时，I/O可以继续进行，不过当I/O请求命中了missing列表的时候，对应的这个待恢复的对象会优先进行恢复，当这个对象恢复完成后，再进行I/O的处理。<br>因为pglog记录数有限制，当对比各个副本上的pglog时，发现故障的副本已经落后太多了，这样就无法根据pglog来恢复了，所以这种情况下就只能全量恢复，称为backfill，坏盘坏机器或者集群扩容时也会触发backfill，这里不做介绍，后续单独一篇文章来进行分析。</p>
+<p>基于pglog的一致性协议包含两种恢复过程，一个是Primary挂掉后又起来的恢复，一种是Replica挂掉后又起来的恢复。</p>
+<h2 id="2-1Primary故障恢复"><a href="http://www.sysnote.org/2016/02/15/ceph-consistency/#2-1Primary%E6%95%85%E9%9A%9C%E6%81%A2%E5%A4%8D" class="headerlink" title="2.1Primary故障恢复"></a>2.1Primary故障恢复</h2><p><a href="./ceph基于pglog的一致性协议 _ System Notes_files/recover-primary.png" class="fancybox fancybox.image" rel="group"><img src="./ceph基于pglog的一致性协议 _ System Notes_files/recover-primary.png" alt="recover-primary"></a><br>简单起见，图中的数字就表示pglog里不同对象的版本。<br>1）正常情况下，都是由Primary处理client端的I/O请求，这时，Primary和Replicas上的last_update和last_complete都会指向pglog最新记录；<br>2）当Primary挂掉后，会选出一个Replica作为“临时主”，这个“临时主”负责处理新的读写请求，并且这个时候“临时主”和剩下的Replicas上的last_complete和last_update都更新到该副本上的pglog的最新记录；<br>3）当原来的Primary又重启时，会从本地读出pginfo和pglog，当发现last_complete&lt;last_update时，last_complete和last_update之间就可能存在丢失的对象，遍历last_complete到last_update之间的pglog记录，对于每一条记录，从本地读出该记录里对象的属性（包含本地持久化过的版本），对比pglog记录里的对象版本与读出来的版本，如果读出来的对象版本小于pglog记录里的版本，说明该对象不是最新的，需要进行恢复，因此<strong>将该对象加到missing列表里</strong>；<br>4）Primary发起peering过程，即“抢回原来的主”，选出权威日志，一般就是“临时主”的pglog，将该权威日志获取过来，与自己的pglog进行merge_log的步骤，构建出missing列表，并且更新自己的last_update为最新的pglog记录（与各个副本一致），这个时候<strong>last_complete与last_update之间的就会加到missing列表，并且peering完成后会持久化last_complete和last_update</strong>；<br>5）当有新的写入时，仍然是由Primary负责处理，会更新last_update，副本上会同时更新last_complete，与此同时，Primary会进行恢复，就是从其他副本上拉取对象数据到自己这里进行恢复，每当恢复完一个时，就会更新自己的last_complete（会持久化的），当所有对象都恢复完成后，last_complete就会追上last_update了。<br>6）当恢复过程中，Primary又挂了再起来恢复时，先读出本地pglog时就会根据自己的last_complete和last_update构建出missing列表，而在peering的时候对比权威日志和本地的pglog发现权威与自己的last_update都一样，peering的过程中就没有新的对象加到missing列表里，总的来说，missing列表就是由两个地方进行构建的：一个是osd启动的时候read_log里构建的，另一个是peering的时候对比权威日志构建的；</p>
+<h2 id="2-2Replica故障恢复"><a href="http://www.sysnote.org/2016/02/15/ceph-consistency/#2-2Replica%E6%95%85%E9%9A%9C%E6%81%A2%E5%A4%8D" class="headerlink" title="2.2Replica故障恢复"></a>2.2Replica故障恢复</h2><p><a href="./ceph基于pglog的一致性协议 _ System Notes_files/recover-replica.png" class="fancybox fancybox.image" rel="group"><img src="./ceph基于pglog的一致性协议 _ System Notes_files/recover-replica.png" alt="recover-replica"></a><br>与Primary的恢复类似，peering都是由Primary发起的，Replica起来后也会根据pglog的last_complete和last_update构建出replica自己的missing，然后Primary进行peering的时候对比权威日志（即自身）与故障replica的日志，结合replica的missing，构建出peer_missing，然后就遍历peer_missing来恢复对象。然后新的写入时会在各个副本上更新last_complete和last_update，其中故障replica上只更新last_update，恢复过程中，每恢复完一个对象，故障replica会更新last_complete，这样所有对象都恢复完成后，replica的last_complete就会追上last_update。<br>如果恢复过程中，故障replica又挂掉，然后重启后进行恢复的时候，也是先读出本地log，对比last_complete与last_update之间的pglog记录里的对象版本与本地读出来的该对象版本，如果本地不是最新的，就会加到missing列表里，然后Primary发起peering的时候发现replica的last_update是最新的，peering过程就没有新的对象加到peer_missing列表里，peer_missing里就是replica自己的missing里的对象。</p>
+
+      
+    </div>
+
+    <div>
+      
+        
+
+      
+    </div>
+
+    <div>
+      
+        
+
+      
+    </div>
+
+    <div>
+      
+        
+
+      
+    </div>
+
+    <footer class="post-footer">
+      
+        <div class="post-tags">
+          
+            <a href="http://www.sysnote.org/tags/ceph/" rel="tag"># ceph</a>
+          
+            <a href="http://www.sysnote.org/tags/pglog/" rel="tag"># pglog</a>
+          
+            <a href="http://www.sysnote.org/tags/consistency/" rel="tag"># consistency</a>
+          
+        </div>
+      
+
+      
+        
+      
+
+      
+        <div class="post-nav">
+          <div class="post-nav-next post-nav-item">
+            
+              <a href="http://www.sysnote.org/2015/12/18/ceph-pglog/" rel="next" title="ceph解读之PGLog">
+                <i class="fa fa-chevron-left"></i> ceph解读之PGLog
+              </a>
+            
+          </div>
+
+          <span class="post-nav-divider"></span>
+
+          <div class="post-nav-prev post-nav-item">
+            
+              <a href="http://www.sysnote.org/2016/02/28/ceph-rbd-snap/" rel="prev" title="ceph rbd快照原理解析">
+                ceph rbd快照原理解析 <i class="fa fa-chevron-right"></i>
+              </a>
+            
+          </div>
+        </div>
+      
+
+      
+      
+    </footer>
+  </article>
+
+
+
+    <div class="post-spread">
+      
+    </div>
+  </div>
+
+
+          </div>
+          
+
+
+          
+  <div class="comments" id="comments">
+    
+      <div id="uyan_frame"></div>
+    
+  </div>
+
+
+        </div>
+        
+          
+  
+  <div class="sidebar-toggle">
+    <div class="sidebar-toggle-line-wrap">
+      <span class="sidebar-toggle-line sidebar-toggle-line-first" style="top: 5px; transform: rotateZ(-45deg); width: 100%;"></span>
+      <span class="sidebar-toggle-line sidebar-toggle-line-middle" style="opacity: 0;"></span>
+      <span class="sidebar-toggle-line sidebar-toggle-line-last" style="top: -5px; transform: rotateZ(45deg); width: 100%;"></span>
+    </div>
+  </div>
+
+  <aside id="sidebar" class="sidebar sidebar-active" style="display: block; width: 320px;">
+    <div class="sidebar-inner">
+
+      
+
+      
+        <ul class="sidebar-nav motion-element" style="opacity: 1; display: block; transform: translateX(0px);">
+          <li class="sidebar-nav-toc sidebar-nav-active" data-target="post-toc-wrap">
+            文章目录
+          </li>
+          <li class="sidebar-nav-overview" data-target="site-overview">
+            站点概览
+          </li>
+        </ul>
+      
+
+      <section class="site-overview sidebar-panel">
+        <div class="site-author motion-element" itemprop="author" itemscope="" itemtype="http://schema.org/Person" style="opacity: 1; display: block; transform: translateX(0px);">
+          <img class="site-author-image" itemprop="image" src="./ceph基于pglog的一致性协议 _ System Notes_files/avatar.png" alt="Wu Dong">
+          <p class="site-author-name" itemprop="name">Wu Dong</p>
+           
+              <p class="site-description motion-element" itemprop="description" style="opacity: 1; display: block; transform: translateX(0px);">Diary Notebook</p>
+          
+        </div>
+        <nav class="site-state motion-element" style="opacity: 1; display: block; transform: translateX(0px);">
+
+          
+            <div class="site-state-item site-state-posts">
+              <a href="http://www.sysnote.org/archives">
+                <span class="site-state-item-count">32</span>
+                <span class="site-state-item-name">日志</span>
+              </a>
+            </div>
+          
+
+          
+            
+            
+            <div class="site-state-item site-state-categories">
+              <a href="http://www.sysnote.org/categories/index.html">
+                <span class="site-state-item-count">6</span>
+                <span class="site-state-item-name">分类</span>
+              </a>
+            </div>
+          
+
+          
+            
+            
+            <div class="site-state-item site-state-tags">
+              <a href="http://www.sysnote.org/tags/index.html">
+                <span class="site-state-item-count">27</span>
+                <span class="site-state-item-name">标签</span>
+              </a>
+            </div>
+          
+
+        </nav>
+
+        
+          <div class="feed-link motion-element" style="opacity: 1; display: block; transform: translateX(0px);">
+            <a href="http://www.sysnote.org/atom.xml" rel="alternate">
+              <i class="fa fa-rss"></i>
+              RSS
+            </a>
+          </div>
+        
+
+        <div class="links-of-author motion-element" style="opacity: 1; display: block; transform: translateX(0px);">
+          
+        </div>
+
+        
+        
+
+        
+        
+
+        
+
+
+      </section>
+
+      
+      <!--noindex-->
+        <section class="post-toc-wrap motion-element sidebar-panel sidebar-panel-active" style="opacity: 1; display: block; transform: translateX(0px);">
+          <div class="post-toc" style="max-height: 788px; width: calc(100% + 17px);">
+
+            
+              
+            
+
+            
+              <div class="post-toc-content"><ol class="nav"><li class="nav-item nav-level-1"><a class="nav-link" href="http://www.sysnote.org/2016/02/15/ceph-consistency/#1-pglog%E5%8F%8A%E8%AF%BB%E5%86%99%E6%B5%81%E7%A8%8B"><span class="nav-number">1.</span> <span class="nav-text">1.pglog及读写流程</span></a></li><li class="nav-item nav-level-1"><a class="nav-link" href="http://www.sysnote.org/2016/02/15/ceph-consistency/#2-%E6%95%85%E9%9A%9C%E6%81%A2%E5%A4%8D"><span class="nav-number">2.</span> <span class="nav-text">2.故障恢复</span></a><ol class="nav-child"><li class="nav-item nav-level-2"><a class="nav-link" href="http://www.sysnote.org/2016/02/15/ceph-consistency/#2-1Primary%E6%95%85%E9%9A%9C%E6%81%A2%E5%A4%8D"><span class="nav-number">2.1.</span> <span class="nav-text">2.1Primary故障恢复</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="http://www.sysnote.org/2016/02/15/ceph-consistency/#2-2Replica%E6%95%85%E9%9A%9C%E6%81%A2%E5%A4%8D"><span class="nav-number">2.2.</span> <span class="nav-text">2.2Replica故障恢复</span></a></li></ol></li></ol></div>
+            
+
+          </div>
+        </section>
+      <!--/noindex-->
+      
+
+      
+
+    </div>
+  </aside>
+
+
+        
+      </div>
+    </main>
+
+    <footer id="footer" class="footer">
+      <div class="footer-inner">
+        <div class="copyright">
+  
+  © 
+  <span itemprop="copyrightYear">2017</span>
+  <span class="with-love">
+    <i class="fa fa-heart"></i>
+  </span>
+  <span class="author" itemprop="copyrightHolder">Wu Dong</span>
+</div>
+
+
+<div class="powered-by">
+  由 <a class="theme-link" href="https://hexo.io/">Hexo</a> 强力驱动
+</div>
+
+<div class="theme-info">
+  主题 -
+  <a class="theme-link" href="https://github.com/iissnan/hexo-theme-next">
+    NexT.Mist
+  </a>
+</div>
+
+
+        
+<div class="busuanzi-count">
+  <script async="" src="./ceph基于pglog的一致性协议 _ System Notes_files/busuanzi.pure.mini.js.下载"></script>
+
+  
+    <span class="site-uv">
+      <i class="fa fa-user"></i>
+      <span class="busuanzi-value" id="busuanzi_value_site_uv"></span>
+      
+    </span>
+  
+
+  
+    <span class="site-pv">
+      <i class="fa fa-eye"></i>
+      <span class="busuanzi-value" id="busuanzi_value_site_pv"></span>
+      
+    </span>
+  
+</div>
+
+
+        
+      </div>
+    </footer>
+
+    
+      <div class="back-to-top">
+        <i class="fa fa-arrow-up"></i>
+        
+      </div>
+    
+
+  </div>
+
+  
+
+<script type="text/javascript">
+  if (Object.prototype.toString.call(window.Promise) !== '[object Function]') {
+    window.Promise = null;
+  }
+</script>
+
+
+
+
+
+
+
+
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+  
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/index.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/fastclick.min.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/jquery.lazyload.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/velocity.min.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/velocity.ui.min.js.下载"></script>
+
+  
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/jquery.fancybox.pack.js.下载"></script>
+
+
+  
+
+
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/utils.js.下载"></script>
+
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/motion.js.下载"></script>
+
+
+
+  
+  
+
+  
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/scrollspy.js.下载"></script>
+<script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/post-details.js.下载"></script>
+
+
+
+  
+
+
+  <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/bootstrap.js.下载"></script>
+
+
+
+  
+
+
+  
+
+
+
+
+	
+
+
+
+
+
+  
+
+
+
+
+
+  
+    
+
+    
+      <!-- UY BEGIN -->
+      <script type="text/javascript" src="./ceph基于pglog的一致性协议 _ System Notes_files/uyan.js.下载"></script>
+      <!-- UY END -->
+    
+  
+
+
+
+
+
+  
+
+
+
+
+
+
+  
+
+
+
+
+
+  
+
+  
+
+  
+
+  
+
+  
+
+
+
+</body></html>
