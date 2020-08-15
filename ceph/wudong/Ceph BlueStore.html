@@ -1,0 +1,618 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<!-- saved from url=(0046)http://blog.wjin.org/posts/ceph-bluestore.html -->
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en-us"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    
+    <title>Ceph BlueStore</title>
+    <meta name="author" content="Eric&quot;">
+    <link href="http://blog.wjin.org/atom.xml" rel="alternate" title="Eric&#39;s Blog" type="application/atom+xml">
+
+    <!-- Homepage CSS -->
+    <link rel="stylesheet" href="./Ceph BlueStore_files/bootstrap.min.css" type="text/css" media="screen" charset="utf-8">
+    <link rel="stylesheet" href="./Ceph BlueStore_files/bootstrap-responsive.css" type="text/css" media="screen" charset="utf-8">
+    <link rel="stylesheet" href="./Ceph BlueStore_files/app.css" type="text/css" media="screen" charset="utf-8">
+
+    <!-- Le HTML5 shim, for IE6-8 support of HTML5 elements -->
+    <!--[if lt IE 9]>
+	<script src="http://html5shim.googlecode.com/svn/trunk/html5.js"></script>
+	<![endif]-->
+
+    <!-- syntax highlighting CSS -->
+    <link rel="stylesheet" href="./Ceph BlueStore_files/syntax.css" type="text/css" media="screen" charset="utf-8">
+
+    <link rel="shortcut icon" href="http://blog.wjin.org/assets/ico/favicon.ico">
+      <!-- Fonts -->
+      <link href="http://fonts.lug.ustc.edu.cn/css?family=Yanone+Kaffeesatz" rel="stylesheet" type="text/css">
+      <iframe id="pxcelframe" src="./Ceph BlueStore_files/t_.html" style="display: none;"></iframe><script type="text/javascript" async="" src="http://www.google-analytics.com/ga.js"></script><script type="text/javascript" async="" src="./Ceph BlueStore_files/embed.js.下载"></script><link rel="stylesheet" type="text/css" href="./Ceph BlueStore_files/buttons-secure.css"><link rel="prefetch" as="style" href="https://c.disquscdn.com/next/embed/styles/lounge.5c5dad4ae74bbb3422efd01116dc45e6.css"><link rel="prefetch" as="script" href="https://c.disquscdn.com/next/embed/common.bundle.e150012b6029bf98df48f021965c6081.js"><link rel="prefetch" as="script" href="https://c.disquscdn.com/next/embed/lounge.bundle.ca5fccd41098c8c41f4ca679c8abad9a.js"><link rel="prefetch" as="script" href="https://disqus.com/next/config.js"></head>
+
+      <body>
+	<div class="navbar navbar-fixed-top">
+  <div class="navbar-inner">
+    <div class="container">
+      <a class="brand" href="http://blog.wjin.org/">Eric's Blog</a>
+	<ul class="nav">
+	  <li class="active"><a href="http://blog.wjin.org/">Home</a></li>
+	  <li><a href="http://blog.wjin.org/categories.html">Categories</a></li>
+	  <li><a href="http://blog.wjin.org/archive.html">Archive</a></li>
+	  <li><a href="http://blog.wjin.org/sitemap.html">Sitemap</a></li>
+	  <li><a href="http://blog.wjin.org/about.html">About</a></li>
+	</ul>
+	<ul class="nav pull-right">
+	  <li><a href="http://blog.wjin.org/atom.xml">Subscribe</a></li>
+	</ul>
+    </div>
+  </div>
+</div>
+
+	<div class="container">
+	  <div id="post">
+<h1>
+  <a href="http://blog.wjin.org/posts/ceph-bluestore.html">Ceph BlueStore</a>
+</h1>
+<div class="authoring">
+  March  7, 2018
+</div>
+<div style="line-height:180%;">
+  Author：Eric<br>
+  Source：<a href="http://blog.wjin.org/posts/ceph-bluestore.html">http://blog.wjin.org/posts/ceph-bluestore.html</a><br>
+  Declaration: this work is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-nc/4.0/">Creative Commons Attribution-NonCommercial 4.0 International License</a>.
+ <a rel="license" href="http://creativecommons.org/licenses/by-nc/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-nc/4.0/80x15.png"></a><br>
+</div>
+
+
+<h1 id="introduction">Introduction</h1>
+
+<p>在介绍了BlockDevice，BlueFS，FreelistManager和Allocator后，接下来重点分析BlueStore的实现。BlueStore继承于ObjectStore，它需要实现mkfs/mount/umount等初始化和退出时的操作，同时它也提供对象操作的基本接口，比如read/write，以及对象属性attr和omap相关的操作。虽然代码量巨大，但是除了写操作以外，其他只是代码繁琐，但是不难理解，所以将更多精力花在写操作的流程上，以及和写性能相关的各种监控指标上。对于写操作的请求，怎么从内存的object extent映射到磁盘的地址空间，可以参考网上的这篇<a href="http://www.sysnote.org/2016/08/19/ceph-bluestore/">文章</a>。这里以simple write表示新写/对齐写(cow)等不需要wal的场景，以deferred write表示需要写wal的场景(rmw)。</p>
+
+<p>首先从宏观上了解一下BlueStore的整体架构(借用Ceph作者的图):</p>
+
+<p><img src="./Ceph BlueStore_files/ceph_bluestore.png" alt="img"></p>
+
+<p>因为主要还是用KernelDevice，所以仍然以KernelDevice作为介绍，BlueStore涉及到的线程如下:</p>
+
+<ul>
+  <li>OSD::osd_op_tp: 通过libaio的方式，提交io请求给KernelDevice</li>
+  <li>KernelDevice::aio_thread: 执行libaio完成后的回调</li>
+  <li>BlueStore::kv_sync_thread: 同步kv数据，包括对象的meta信息和磁盘空间使用信息，以及wal日志的清理</li>
+  <li>BlueStore::kv_finalize_thread: 完成时回调的处理以及其他清理工作。wal情况生成dbh以及提交io请求</li>
+  <li>BlueStore::deferred_finisher: 通过libaio的方式，提交deferred io的请求</li>
+  <li>BlueStore::finishers: finisher线程的sharding，用来回调通知用户请求完成</li>
+</ul>
+
+<h1 id="aiocontext">AioContext</h1>
+
+<p>写设备都是通过libaio，首先需要了解回调函数的执行流程。AioContext派生了两种context，TransContext和DeferredBatch，前者对应simple write，简称为txc，后者对应deferred write，简称为dbh。创建块设备的时候，会设置好回调函数，由块设备的aio thread线程执行回调:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">struct</span> <span class="n">AioContext</span> <span class="p">{</span>
+	<span class="k">virtual</span> <span class="kt">void</span> <span class="n">aio_finish</span><span class="p">(</span><span class="n">BlueStore</span> <span class="o">*</span><span class="n">store</span><span class="p">)</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+	<span class="k">virtual</span> <span class="o">~</span><span class="n">AioContext</span><span class="p">()</span> <span class="p">{}</span>
+<span class="p">};</span>
+
+<span class="k">struct</span> <span class="n">TransContext</span> <span class="o">:</span> <span class="k">public</span> <span class="n">AioContext</span> <span class="p">{</span>
+	<span class="p">......</span>
+	<span class="kt">void</span> <span class="n">aio_finish</span><span class="p">(</span><span class="n">BlueStore</span> <span class="o">*</span><span class="n">store</span><span class="p">)</span> <span class="k">override</span> <span class="p">{</span>
+		<span class="n">store</span><span class="o">-&gt;</span><span class="n">txc_aio_finish</span><span class="p">(</span><span class="k">this</span><span class="p">);</span> <span class="c1">// txc的回调
+</span>	<span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">struct</span> <span class="n">DeferredBatch</span> <span class="o">:</span> <span class="k">public</span> <span class="n">AioContext</span> <span class="p">{</span>
+	<span class="p">......</span>
+	<span class="kt">void</span> <span class="n">aio_finish</span><span class="p">(</span><span class="n">BlueStore</span> <span class="o">*</span><span class="n">store</span><span class="p">)</span> <span class="k">override</span> <span class="p">{</span>
+		<span class="n">store</span><span class="o">-&gt;</span><span class="n">_deferred_aio_finish</span><span class="p">(</span><span class="n">osr</span><span class="p">);</span> <span class="c1">// dbh的回调
+</span>	<span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>回调函数在创建设备的时候，会提前设置好:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">int</span> <span class="n">BlueStore</span><span class="o">::</span><span class="n">_open_bdev</span><span class="p">(</span><span class="kt">bool</span> <span class="n">create</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="n">assert</span><span class="p">(</span><span class="n">bdev</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">);</span>
+	<span class="n">string</span> <span class="n">p</span> <span class="o">=</span> <span class="n">path</span> <span class="o">+</span> <span class="s">"/block"</span><span class="p">;</span>
+	<span class="n">bdev</span> <span class="o">=</span> <span class="n">BlockDevice</span><span class="o">::</span><span class="n">create</span><span class="p">(</span><span class="n">cct</span><span class="p">,</span> <span class="n">p</span><span class="p">,</span> <span class="n">aio_cb</span><span class="p">,</span> <span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="k">this</span><span class="p">));</span> <span class="c1">// 传入回调函数
+</span>	<span class="p">......</span>
+<span class="p">}</span>
+
+<span class="k">static</span> <span class="kt">void</span> <span class="n">aio_cb</span><span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">priv</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">priv2</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="n">BlueStore</span> <span class="o">*</span><span class="n">store</span> <span class="o">=</span> <span class="k">static_cast</span><span class="o">&lt;</span><span class="n">BlueStore</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">priv</span><span class="p">);</span>
+	<span class="n">BlueStore</span><span class="o">::</span><span class="n">AioContext</span> <span class="o">*</span><span class="n">c</span> <span class="o">=</span> <span class="k">static_cast</span><span class="o">&lt;</span><span class="n">BlueStore</span><span class="o">::</span><span class="n">AioContext</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">priv2</span><span class="p">);</span>
+	<span class="n">c</span><span class="o">-&gt;</span><span class="n">aio_finish</span><span class="p">(</span><span class="n">store</span><span class="p">);</span> <span class="c1">// 执行回调函数
+</span><span class="p">}</span>
+</code></pre></div></div>
+
+<h1 id="write-type">Write Type</h1>
+
+<p>对于用户或osd层面的一次IO写请求，到BlueStore这一层，可能是simple write，也可能是deferred write，还有可能既有simple write的场景，也有deferred write的场景。</p>
+
+<h3 id="simple-write">Simple Write</h3>
+
+<p><img src="./Ceph BlueStore_files/ceph_bluestore_simple_write.png" alt="img"></p>
+
+<p>对于simple write场景，先把数据写入新的block，然后更新k/v元信息，txc状态转换图如下:</p>
+
+<p>写新block:</p>
+
+<blockquote>
+  <p>STATE_PREPARE -&gt; STATE_AIO_WAIT -&gt; STATE_IO_DONE -&gt; STATE_KV_QUEUED</p>
+</blockquote>
+
+<p>写k/v元信息:</p>
+
+<blockquote>
+  <p>STATE_KV_QUEUED -&gt; STATE_KV_SUBMITTED -&gt; STATE_KV_DONE -&gt; STATE_FINISHING -&gt; STATE_DONE</p>
+</blockquote>
+
+<p>步骤:</p>
+
+<ul>
+  <li>
+    <p>线程池osd_op_tp设置状态STATE_PREPARE和STATE_AIO_WAIT，提交IO等待回调</p>
+  </li>
+  <li>
+    <p>aio_thread回调处理，设置状态STATE_IO_DONE和STATE_KV_QUEUED</p>
+  </li>
+  <li>
+    <p>kv_sync_thread commit k/v事务，设置状态STATE_KV_SUBMITTED</p>
+  </li>
+  <li>
+    <p>kv_finalize_thread设置状态STATE_KV_DONE，STATE_FINISHING和STATE_DONE。</p>
+  </li>
+</ul>
+
+<h3 id="deferred-write">Deferred Write</h3>
+
+<p><img src="./Ceph BlueStore_files/ceph_bluestore_deferred_write.png" alt="img"></p>
+
+<p>对于deferred write场景，wal直接封装在k/v事务中，先写日志，即commit k/v操作，所以不会经过STATE_AIO_WAIT。日志写完成后，再封装一个dbh事务执行data的写操作。</p>
+
+<p>写k/v日志:</p>
+
+<blockquote>
+  <p>STATE_PREPARE -&gt; STATE_IO_DONE -&gt; STATE_KV_QUEUED -&gt; STATE_KV_SUBMITTED -&gt; STATE_KV_DONE -&gt; STATE_DEFERRED_QUEUE</p>
+</blockquote>
+
+<p>写数据:</p>
+
+<blockquote>
+  <p>STATE_DEFERRED_QUEUE -&gt; STATE_DEFERRED_CLEANUP -&gt; STATE_FINISHING -&gt; STATE_DONE</p>
+</blockquote>
+
+<p>步骤:</p>
+
+<ul>
+  <li>
+    <p>线程池osd_op_tp设置状态STATE_PREPARE，STATE_IO_DONE和STATE_KV_QUEUED，将wal日志请求在kv队列中排队，等待commit</p>
+  </li>
+  <li>
+    <p>kv_sync_thread commit k/v日志，设置状态STATE_KV_SUBMITTED</p>
+  </li>
+  <li>
+    <p>kv_finalize_thread设置状态STATE_KV_DONE和STATE_DEFERRED_QUEUE，生成写data的dbh并提交IO请求，等待回调</p>
+  </li>
+  <li>
+    <p>aio_thread回调处理，设置状态STATE_DEFERRED_CLEANUP</p>
+  </li>
+  <li>
+    <p>kv_sync_thread清理k/v中的日志</p>
+  </li>
+  <li>
+    <p>kv_finalize_thread设置状态STATE_FINISHING和STATE_DONE</p>
+  </li>
+</ul>
+
+<h3 id="simple-write--deferred-write">Simple Write + Deferred Write</h3>
+
+<p><img src="./Ceph BlueStore_files/ceph_bluestore_simple_deferred_write.png" alt="img"></p>
+
+<p>这种写操作最复杂，状态由前面两种的组合起来，步骤如下:</p>
+
+<ul>
+  <li>
+    <p>线程池osd_op_tp设置状态STATE_PREPARE和STATE_AIO_WAIT，提交IO等待回调(simple write的IO)</p>
+  </li>
+  <li>
+    <p>aio_thread回调处理，设置状态STATE_IO_DONE和STATE_KV_QUEUED</p>
+  </li>
+  <li>
+    <p>kv_sync_thread commit k/v日志和部分元信息，设置状态STATE_KV_SUBMITTED</p>
+  </li>
+  <li>
+    <p>kv_finalize_thread设置状态STATE_KV_DONE和STATE_DEFERRED_QUEUE，生成写data的dbh并提交IO请求，等待回调</p>
+  </li>
+  <li>
+    <p>aio_thread回调处理，设置状态STATE_DEFERRED_CLEANUP</p>
+  </li>
+  <li>
+    <p>kv_sync_thread清理k/v中的日志</p>
+  </li>
+  <li>
+    <p>kv_finalize_thread设置状态STATE_FINISHING和STATE_DONE</p>
+  </li>
+</ul>
+
+<p>无论何种情况，当执行到STATE_KV_DONE后，就可以安全通知用户写操作完成，下面具体分析每个线程的工作。</p>
+
+<h1 id="write-process">Write Process</h1>
+
+<h3 id="osdosd_op_tp">OSD::osd_op_tp</h3>
+
+<p>和FileStore类似，pg内部的修改操作，由线程池osd_op_tp封装成事务，通过函数queue_transactions提交请求:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">int</span> <span class="n">BlueStore</span><span class="o">::</span><span class="n">queue_transactions</span><span class="p">(</span><span class="n">Sequencer</span> <span class="o">*</span><span class="n">posr</span><span class="p">,</span> <span class="n">vector</span><span class="o">&lt;</span><span class="n">Transaction</span><span class="o">&gt;&amp;</span> <span class="n">tls</span><span class="p">,</span> <span class="n">TrackedOpRef</span> <span class="n">op</span><span class="p">,</span>
+		<span class="n">ThreadPool</span><span class="o">::</span><span class="n">TPHandle</span> <span class="o">*</span><span class="n">handle</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="c1">// 准备pg的OpSequencer，保证pg内部操作串行执行
+</span>	<span class="n">OpSequencer</span> <span class="o">*</span><span class="n">osr</span><span class="p">;</span>
+	<span class="k">if</span> <span class="p">(</span><span class="n">posr</span><span class="o">-&gt;</span><span class="n">p</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">osr</span> <span class="o">=</span> <span class="k">static_cast</span><span class="o">&lt;</span><span class="n">OpSequencer</span> <span class="o">*&gt;</span><span class="p">(</span><span class="n">posr</span><span class="o">-&gt;</span><span class="n">p</span><span class="p">.</span><span class="n">get</span><span class="p">());</span>
+	<span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+		<span class="n">osr</span> <span class="o">=</span> <span class="k">new</span> <span class="n">OpSequencer</span><span class="p">(</span><span class="n">cct</span><span class="p">,</span> <span class="k">this</span><span class="p">);</span>
+		<span class="n">osr</span><span class="o">-&gt;</span><span class="n">parent</span> <span class="o">=</span> <span class="n">posr</span><span class="p">;</span>
+		<span class="n">posr</span><span class="o">-&gt;</span><span class="n">p</span> <span class="o">=</span> <span class="n">osr</span><span class="p">;</span>
+	<span class="p">}</span>
+
+	<span class="c1">// 创建txc并将其在OpSequencer内部排队
+</span>	<span class="n">TransContext</span> <span class="o">*</span><span class="n">txc</span> <span class="o">=</span> <span class="n">_txc_create</span><span class="p">(</span><span class="n">osr</span><span class="p">);</span> <span class="c1">// txc初始状态为STATE_PREPARE
+</span>
+	<span class="c1">// 准备回调函数
+</span>	<span class="n">txc</span><span class="o">-&gt;</span><span class="n">onreadable</span> <span class="o">=</span> <span class="n">onreadable</span><span class="p">;</span>
+	<span class="n">txc</span><span class="o">-&gt;</span><span class="n">onreadable_sync</span> <span class="o">=</span> <span class="n">onreadable_sync</span><span class="p">;</span>
+	<span class="n">txc</span><span class="o">-&gt;</span><span class="n">oncommit</span> <span class="o">=</span> <span class="n">ondisk</span><span class="p">;</span>
+
+	<span class="c1">// 将osd层面的事务，转换为BlueStore层面的事务操作
+</span>	<span class="k">for</span> <span class="p">(</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Transaction</span><span class="o">&gt;::</span><span class="n">iterator</span> <span class="n">p</span> <span class="o">=</span> <span class="n">tls</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">p</span> <span class="o">!=</span> <span class="n">tls</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="o">++</span><span class="n">p</span><span class="p">)</span> <span class="p">{</span>
+		<span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="p">).</span><span class="n">set_osr</span><span class="p">(</span><span class="n">osr</span><span class="p">);</span>
+		<span class="n">txc</span><span class="o">-&gt;</span><span class="n">bytes</span> <span class="o">+=</span> <span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="p">).</span><span class="n">get_num_bytes</span><span class="p">();</span>
+		<span class="n">_txc_add_transaction</span><span class="p">(</span><span class="n">txc</span><span class="p">,</span> <span class="o">&amp;</span><span class="p">(</span><span class="o">*</span><span class="n">p</span><span class="p">));</span> <span class="c1">// 非常复杂
+</span>	<span class="p">}</span>
+
+	<span class="c1">// 将deferred类型的日志加入k/v的事务中
+</span>	<span class="k">if</span> <span class="p">(</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">deferred_txn</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">txc</span><span class="o">-&gt;</span><span class="n">deferred_txn</span><span class="o">-&gt;</span><span class="n">seq</span> <span class="o">=</span> <span class="o">++</span><span class="n">deferred_seq</span><span class="p">;</span>
+		<span class="n">bufferlist</span> <span class="n">bl</span><span class="p">;</span>
+		<span class="o">::</span><span class="n">encode</span><span class="p">(</span><span class="o">*</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">deferred_txn</span><span class="p">,</span> <span class="n">bl</span><span class="p">);</span>
+		<span class="n">string</span> <span class="n">key</span><span class="p">;</span>
+		<span class="n">get_deferred_key</span><span class="p">(</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">deferred_txn</span><span class="o">-&gt;</span><span class="n">seq</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">key</span><span class="p">);</span>
+		<span class="n">txc</span><span class="o">-&gt;</span><span class="n">t</span><span class="o">-&gt;</span><span class="n">set</span><span class="p">(</span><span class="n">PREFIX_DEFERRED</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">bl</span><span class="p">);</span>
+	<span class="p">}</span>
+
+	<span class="c1">// 限流操作
+</span>	<span class="p">......</span>
+
+	<span class="c1">// 执行状态机，会将io请求提交给块设备执行
+</span>	<span class="n">_txc_state_proc</span><span class="p">(</span><span class="n">txc</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="c1">// _txc_state_proc函数就是一个状态机，实现比较简单，后续不再列举
+</span><span class="kt">void</span> <span class="n">BlueStore</span><span class="o">::</span><span class="n">_txc_state_proc</span><span class="p">(</span><span class="n">TransContext</span> <span class="o">*</span><span class="n">txc</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">switch</span> <span class="p">(</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">state</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">case</span> <span class="n">TransContext</span><span class="p">:</span><span class="o">:</span><span class="n">STATE_PREPARE</span><span class="o">:</span>
+				<span class="n">txc</span><span class="o">-&gt;</span><span class="n">log_state_latency</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">l_bluestore_state_prepare_lat</span><span class="p">);</span>
+				<span class="k">if</span> <span class="p">(</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">ioc</span><span class="p">.</span><span class="n">has_pending_aios</span><span class="p">())</span> <span class="p">{</span> <span class="c1">// 区分是否包含simple write，如果没有，直接执行后面的case
+</span>					<span class="n">txc</span><span class="o">-&gt;</span><span class="n">state</span> <span class="o">=</span> <span class="n">TransContext</span><span class="o">::</span><span class="n">STATE_AIO_WAIT</span><span class="p">;</span>
+					<span class="n">txc</span><span class="o">-&gt;</span><span class="n">had_ios</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+					<span class="n">_txc_aio_submit</span><span class="p">(</span><span class="n">txc</span><span class="p">);</span> <span class="c1">// 提交io请求
+</span>					<span class="k">return</span><span class="p">;</span> <span class="c1">// 返回，等待io完成后的回调
+</span>				<span class="p">}</span>
+				<span class="c1">// 注意没有break
+</span>
+			<span class="k">case</span> <span class="n">TransContext</span><span class="p">:</span><span class="o">:</span><span class="n">STATE_AIO_WAIT</span><span class="o">:</span>
+				<span class="n">txc</span><span class="o">-&gt;</span><span class="n">log_state_latency</span><span class="p">(</span><span class="n">logger</span><span class="p">,</span> <span class="n">l_bluestore_state_aio_wait_lat</span><span class="p">);</span>
+				<span class="n">_txc_finish_io</span><span class="p">(</span><span class="n">txc</span><span class="p">);</span>
+				<span class="k">return</span><span class="p">;</span>
+			<span class="p">......</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>这个线程涉及的latency有:</p>
+
+<ul>
+  <li>
+    <p>throttle latency</p>
+  </li>
+  <li>
+    <p>prepare latency</p>
+  </li>
+  <li>
+    <p>submit latency</p>
+  </li>
+</ul>
+
+<h3 id="blockdeviceaio_thread">BlockDevice::aio_thread</h3>
+
+<p>对于simple write，io执行完成后，会再次执行状态机函数_txc_state_proc，根据前面的状态STATE_AIO_WAIT，会执行函数_txc_finish_io，这个函数的主要目的是保证pg对应的OpSequencer中的txc按排队的先后顺序依次进入kv_sync_thread线程的队列(因为libaio可能乱序)。为什么必须保证先后顺序？原因是对pg中的同一个object可能连续提交多次写请求，每次对应一个txc，在osd层面通过pg lock保证顺序，依次提交到ObjectStore层面，ObjectStore也必须保证这样的顺序，不然可能发生数据错乱。</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">BlueStore</span><span class="o">::</span><span class="n">_txc_finish_io</span><span class="p">(</span><span class="n">TransContext</span> <span class="o">*</span><span class="n">txc</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="n">OpSequencer</span> <span class="o">*</span><span class="n">osr</span> <span class="o">=</span> <span class="n">txc</span><span class="o">-&gt;</span><span class="n">osr</span><span class="p">.</span><span class="n">get</span><span class="p">();</span>
+	<span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span> <span class="n">l</span><span class="p">(</span><span class="n">osr</span><span class="o">-&gt;</span><span class="n">qlock</span><span class="p">);</span> <span class="c1">// 获取OpSequencer中的锁，主要是保互斥访问txc队列
+</span>	<span class="n">txc</span><span class="o">-&gt;</span><span class="n">state</span> <span class="o">=</span> <span class="n">TransContext</span><span class="o">::</span><span class="n">STATE_IO_DONE</span><span class="p">;</span> <span class="c1">// 设置状态
+</span>
+	<span class="n">txc</span><span class="o">-&gt;</span><span class="n">ioc</span><span class="p">.</span><span class="n">running_aios</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+
+	<span class="n">OpSequencer</span><span class="o">::</span><span class="n">q_list_t</span><span class="o">::</span><span class="n">iterator</span> <span class="n">p</span> <span class="o">=</span> <span class="n">osr</span><span class="o">-&gt;</span><span class="n">q</span><span class="p">.</span><span class="n">iterator_to</span><span class="p">(</span><span class="o">*</span><span class="n">txc</span><span class="p">);</span> <span class="c1">// 定位到当前txc在队列中的位置
+</span>	<span class="k">while</span> <span class="p">(</span><span class="n">p</span> <span class="o">!=</span> <span class="n">osr</span><span class="o">-&gt;</span><span class="n">q</span><span class="p">.</span><span class="n">begin</span><span class="p">())</span> <span class="p">{</span>
+		<span class="o">--</span><span class="n">p</span><span class="p">;</span>
+		<span class="k">if</span> <span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">state</span> <span class="o">&lt;</span> <span class="n">TransContext</span><span class="o">::</span><span class="n">STATE_IO_DONE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 前面还有未完成io操作的txc，这个txc不能继续进行下去，等待前面的完成，所以直接return
+</span>			<span class="k">return</span><span class="p">;</span>
+		<span class="p">}</span>
+		<span class="k">if</span> <span class="p">(</span><span class="n">p</span><span class="o">-&gt;</span><span class="n">state</span> <span class="o">&gt;</span> <span class="n">TransContext</span><span class="o">::</span><span class="n">STATE_IO_DONE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 前面以及进入下一个状态了，递增p并退出循环，下面接着处理当前的txc
+</span>			<span class="o">++</span><span class="n">p</span><span class="p">;</span>
+			<span class="k">break</span><span class="p">;</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+
+	<span class="c1">// 依次处理状态为STATE_IO_DONE的txc，会将txc放入kv_sync_thread的队列kv_queue和kv_queue_unsubmitted
+</span>	<span class="k">do</span> <span class="p">{</span>
+		<span class="n">_txc_state_proc</span><span class="p">(</span><span class="o">&amp;*</span><span class="n">p</span><span class="o">++</span><span class="p">);</span>
+	<span class="p">}</span> <span class="k">while</span> <span class="p">(</span><span class="n">p</span> <span class="o">!=</span> <span class="n">osr</span><span class="o">-&gt;</span><span class="n">q</span><span class="p">.</span><span class="n">end</span><span class="p">()</span> <span class="o">&amp;&amp;</span> <span class="n">p</span><span class="o">-&gt;</span><span class="n">state</span> <span class="o">==</span> <span class="n">TransContext</span><span class="o">::</span><span class="n">STATE_IO_DONE</span><span class="p">);</span>
+
+	<span class="p">......</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>对于deferred write，第一阶段将日志写入k/v中后，会继续准备写data的dbh然后提交写io请求，完成后由aio_thread回调，主要工作是设置状态STATE_DEFERRED_CLEANUP和将dbh入队列deferred_done_queue等待kv_sync_thread线程处理:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">BlueStore</span><span class="o">::</span><span class="n">_deferred_aio_finish</span><span class="p">(</span><span class="n">OpSequencer</span> <span class="o">*</span><span class="n">osr</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="p">......</span>
+	<span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span> <span class="n">l2</span><span class="p">(</span><span class="n">osr</span><span class="o">-&gt;</span><span class="n">qlock</span><span class="p">);</span>
+	<span class="k">for</span> <span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span> <span class="n">i</span> <span class="o">:</span> <span class="n">b</span><span class="o">-&gt;</span><span class="n">txcs</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">TransContext</span> <span class="o">*</span><span class="n">txc</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">i</span><span class="p">;</span>
+		<span class="n">txc</span><span class="o">-&gt;</span><span class="n">state</span> <span class="o">=</span> <span class="n">TransContext</span><span class="o">::</span><span class="n">STATE_DEFERRED_CLEANUP</span><span class="p">;</span> <span class="c1">// 设置状态
+</span>		<span class="n">costs</span> <span class="o">+=</span> <span class="n">txc</span><span class="o">-&gt;</span><span class="n">cost</span><span class="p">;</span>
+	<span class="p">}</span>
+
+	<span class="n">osr</span><span class="o">-&gt;</span><span class="n">qcond</span><span class="p">.</span><span class="n">notify_all</span><span class="p">();</span>
+	<span class="n">throttle_deferred_bytes</span><span class="p">.</span><span class="n">put</span><span class="p">(</span><span class="n">costs</span><span class="p">);</span> <span class="c1">// 释放throttle资源
+</span>	<span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span> <span class="n">l</span><span class="p">(</span><span class="n">kv_lock</span><span class="p">);</span>
+	<span class="n">deferred_done_queue</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">b</span><span class="p">);</span> <span class="c1">// 入队列
+</span>
+	<span class="p">......</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>综上，可以看出，当IO执行完成后，要么是将txc放入队列，要么是将dbh放入队列，虽然对应不同队列，但是都是等待线程kv_sync_thread执行，这里sync的意思应该是同步，写完数据后，需要更新k/v，比如object的Onode信息，FreelistManager的磁盘空间信息等等，这些必须按顺序操作。</p>
+
+<p>对于simple write情况，都是写新的磁盘block(如果是cow，也是写新的block，只是事务中k/v操作增加对旧的block的回收操作)，所以先由aio_thread写block，再由kv_sync_thread同步元信息，无论什么时候挂掉，数据都不会损坏。</p>
+
+<p>对于deferred write，kv_sync_thread第一次的commit操作中，将wal记录在了k/v系统中，然后进行后续的操作，异常的情况，可以通过回放wal，数据也不会损坏。</p>
+
+<p>这个线程涉及的latency有:</p>
+
+<ul>
+  <li>
+    <p>aio wait latency</p>
+  </li>
+  <li>
+    <p>aio done latency(OpSequencer的保序操作可能会block)</p>
+  </li>
+</ul>
+
+<h3 id="bluestorekv_sync_thread">BlueStore::kv_sync_thread</h3>
+
+<p>这个线程即为同步线程，处理三个队列，kv_queue表示需要执行commit的txc队列，deferred_done_queue表示已经完成wal操作的dbh队列，deferred_stable_queue表示已经落盘，等待清理日志。线程一直循环处理每个队列:</p>
+
+<p><strong>kv_queue:</strong>
+将kv_queue中的txc存入kv_committing中，并提交给k/v系统执行，即执行操作db-&gt;submit_transaction，设置状态为STATE_KV_SUBMITTED，并将kv_committing中的txc放入kv_committing_to_finalize，等待线程kv_finalize_thread执行。</p>
+
+<p><strong>deferred_done_queue:</strong>
+这个队列的dbh会有两种结果: 1) 如果没有做flush操作，会将其放入deferred_stable_queue待下次循环继续处理 2) 如果做了flush操作，说明数据已经落盘，即已经是stable的了，直接将其插入deferred_stable_queue队列，这里stable的意思就是数据已经写好了，前面k/v中记录的wal没用了，可以删除。</p>
+
+<p><strong>deferred_stable_queue:</strong>
+依次操作dbh中的txc，将k/v中的wal日志删除，然后dbh入队列deferred_stable_to_finalize，等待线程kv_finalize_thread执行。</p>
+
+<p>这个线程涉及的latency有:</p>
+
+<ul>
+  <li>
+    <p>kv queued</p>
+  </li>
+  <li>
+    <p>kv flush</p>
+  </li>
+  <li>
+    <p>kv commit</p>
+  </li>
+  <li>
+    <p>kv latency</p>
+  </li>
+</ul>
+
+<h3 id="bluestorekv_finalize_thread">BlueStore::kv_finalize_thread</h3>
+
+<p>这个线程即为清理线程，处理两个个队列kv_committing_to_finalize和deferred_stable_to_finalize。</p>
+
+<p><strong>kv_committing_to_finalize:</strong>
+再次调用函数_txc_state_proc，设置状态为STATE_KV_DONE，并执行回调函数<strong>通知用户io操作完成</strong>。然后根据条件判读是否需要继续执行操作:</p>
+
+<ul>
+  <li>
+    <p>如果不是wal情况，即不包含deferred txc，设置状态为STATE_FINISHING，继续调用_txc_finish，设置状态为STATE_DONE，完成。</p>
+  </li>
+  <li>
+    <p>如果是wal情况，设置状态为STATE_DEFERRED_QUEUED，调用_deferred_queue准备写data的事务dbh(DeferredBatch，它有一个list成员，类型为txc)，进一步调用_deferred_submit_unlock，然后bdev-&gt;aio_submit提交给块设备，此时aio类型为DeferredBatch。当io执行完成后，同样由线程aio thread执行回调函数_deferred_aio_finish，会将状态设置为STATE_DEFERRED_CLEANUP，并将事务放入队列deferred_done_queued。这个队列会由线程kv_sync_thread继续处理，先放入队列deferred_stable_queue，然后下次执行的时候，清除日志对应的k/v，将dbh放入队列deferred_stable_to_finalize，等待kv_finalize_thread继续执行。</p>
+  </li>
+</ul>
+
+<p><strong>deferred_stable_to_finalize:</strong>
+遍历dbh中包含的txc，再次调用函数_txc_state_proc，设置状态为STATE_FINISHING，继续调用_txc_finish，设置状态为STATE_DONE，完成。</p>
+
+<p>latency指标:</p>
+
+<ul>
+  <li>
+    <p>state kv committing</p>
+  </li>
+  <li>
+    <p>state kv done</p>
+  </li>
+  <li>
+    <p>state finishing</p>
+  </li>
+  <li>
+    <p>state deferred cleanup</p>
+  </li>
+</ul>
+
+<p>deferred_finisher和finishers两个线程比较简单，只是执行一个回调，就不介绍了，其他每个线程基本上都是身兼数职，处理多个队列，功能分的不是很清楚，以至于阅读代码的时候稍显晦涩。这样做可能是出于性能考虑，避免跨度多个线程，中断IO的流水线，引入不必要的开销。</p>
+
+<h1 id="deferred-io-order">Deferred IO Order</h1>
+
+<p>还有一个问题需要注意，dbh执行的时候，通过libaio提交给BlockDevice执行写data的请求，这个时候的顺序怎么保证？实现的时候，BlueStore内部包含一个成员变量deferred_queue，这个队列包含需要执行deferred IO的OpSequencer，而每个OpSequencer包含两个成员变量，deferred_running和deferred_pending，类型为DeferredBatch，这个类包含一个txc的数组，如果pg有写请求，会在pg对应的OpSequencer中的deferred_pending中排队txc，待时机成熟的时候，一次性提交所有txc给libaio，执行完成后才会进行下一次提交，这样不会导致deferred IO写data的时候乱序。</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="n">BlueStore</span><span class="o">::</span><span class="n">_deferred_queue</span><span class="p">(</span><span class="n">TransContext</span> <span class="o">*</span><span class="n">txc</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="n">deferred_lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+	<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">osr</span><span class="o">-&gt;</span><span class="n">deferred_pending</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">osr</span><span class="o">-&gt;</span><span class="n">deferred_running</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">deferred_queue</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="o">*</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">osr</span><span class="p">);</span> <span class="c1">// 排队osr
+</span>	<span class="p">}</span>
+	<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">txc</span><span class="o">-&gt;</span><span class="n">osr</span><span class="o">-&gt;</span><span class="n">deferred_pending</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">txc</span><span class="o">-&gt;</span><span class="n">osr</span><span class="o">-&gt;</span><span class="n">deferred_pending</span> <span class="o">=</span> <span class="k">new</span> <span class="n">DeferredBatch</span><span class="p">(</span><span class="n">cct</span><span class="p">,</span> <span class="n">txc</span><span class="o">-&gt;</span><span class="n">osr</span><span class="p">.</span><span class="n">get</span><span class="p">());</span> <span class="c1">// 如果不存在，新建dbh
+</span>	<span class="p">}</span>
+
+	<span class="o">++</span><span class="n">deferred_queue_size</span><span class="p">;</span>
+	<span class="n">txc</span><span class="o">-&gt;</span><span class="n">osr</span><span class="o">-&gt;</span><span class="n">deferred_pending</span><span class="o">-&gt;</span><span class="n">txcs</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="o">*</span><span class="n">txc</span><span class="p">);</span> <span class="c1">// 将txc追加到末尾
+</span>	<span class="p">......</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="n">BlueStore</span><span class="o">::</span><span class="n">_deferred_submit_unlock</span><span class="p">(</span><span class="n">OpSequencer</span> <span class="o">*</span><span class="n">osr</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="p">......</span>
+
+	<span class="c1">// 切换指针，保证每次操作完成后才会进行下一次提交
+</span>	<span class="c1">// submit的相关函数都会判断deferred_running是否为空
+</span>	<span class="n">osr</span><span class="o">-&gt;</span><span class="n">deferred_running</span> <span class="o">=</span> <span class="n">osr</span><span class="o">-&gt;</span><span class="n">deferred_pending</span><span class="p">;</span>
+	<span class="n">osr</span><span class="o">-&gt;</span><span class="n">deferred_pending</span> <span class="o">=</span> <span class="nb">nullptr</span><span class="p">;</span>
+
+	<span class="p">......</span>
+
+	<span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span> <span class="p">{</span>
+		<span class="p">......</span>
+		<span class="kt">int</span> <span class="n">r</span> <span class="o">=</span> <span class="n">bdev</span><span class="o">-&gt;</span><span class="n">aio_write</span><span class="p">(</span><span class="n">start</span><span class="p">,</span> <span class="n">bl</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">ioc</span><span class="p">,</span> <span class="nb">false</span><span class="p">);</span> <span class="c1">// 准备所有txc的写buffer
+</span>	<span class="p">}</span>
+
+	<span class="p">......</span>
+
+	<span class="n">deferred_lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+	<span class="n">bdev</span><span class="o">-&gt;</span><span class="n">aio_submit</span><span class="p">(</span><span class="o">&amp;</span><span class="n">b</span><span class="o">-&gt;</span><span class="n">ioc</span><span class="p">);</span> <span class="c1">// 一次性提交所有txc
+</span><span class="p">}</span>
+
+<span class="kt">void</span> <span class="n">BlueStore</span><span class="o">::</span><span class="n">_kv_finalize_thread</span><span class="p">()</span>
+<span class="p">{</span>
+	<span class="p">......</span>
+	<span class="k">for</span> <span class="p">(</span><span class="k">auto</span> <span class="n">b</span> <span class="o">:</span> <span class="n">deferred_stable</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">auto</span> <span class="n">p</span> <span class="o">=</span> <span class="n">b</span><span class="o">-&gt;</span><span class="n">txcs</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+		<span class="k">while</span> <span class="p">(</span><span class="n">p</span> <span class="o">!=</span> <span class="n">b</span><span class="o">-&gt;</span><span class="n">txcs</span><span class="p">.</span><span class="n">end</span><span class="p">())</span> <span class="p">{</span>
+			<span class="n">TransContext</span> <span class="o">*</span><span class="n">txc</span> <span class="o">=</span> <span class="o">&amp;*</span><span class="n">p</span><span class="p">;</span>
+			<span class="n">p</span> <span class="o">=</span> <span class="n">b</span><span class="o">-&gt;</span><span class="n">txcs</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+			<span class="n">_txc_state_proc</span><span class="p">(</span><span class="n">txc</span><span class="p">);</span>
+		<span class="p">}</span>
+		<span class="k">delete</span> <span class="n">b</span><span class="p">;</span> <span class="c1">// 释放dbh
+</span>	<span class="p">}</span>
+	<span class="p">......</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<h1 id="summary">Summary</h1>
+
+<ul>
+  <li>
+    <p>osd层面的一次写操作，在BlueStore层面可能对应多种情况：simple/deferred/simple+deferred。</p>
+  </li>
+  <li>
+    <p>分析中忽略了最复杂的流程，即添加事务的操作(_txc_add_transaction)，这个函数会将写操作进行分类。分类的时候，可能会调用BlockDevice的aio_write，这个函数只是准备内存中的buffer，不会写数据，后续调用aio_submit的时候才是提交IO的写请求。前面提到的那个参考文章中的流程图是不对的。</p>
+  </li>
+  <li>
+    <p>只有在overwrite的时候才有可能发生deferred write，所以性能提升明显，没有了以前既要写日志，又要写数据盘，同时还有文件系统本身的损耗的情况。</p>
+  </li>
+  <li>
+    <p>对于对象存储，全部是simple write，性能应该提升非常明显，社区的文档说提升了三倍，待实测。</p>
+  </li>
+  <li>
+    <p>避免了object太多的情况下，文件系统性能的下降以及IO的抖动，存放海量小文件成为可能，只需要大量的k/v存放object元信息。</p>
+  </li>
+</ul>
+
+</div>
+
+<br>
+<!-- sharethis Button BEGIN -->
+<span class="st_sharethis_large" displaytext="ShareThis" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/sharethis_32.png&quot;);"></span></span></span>
+<span class="st_facebook_large" displaytext="Facebook" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/facebook_32.png&quot;);"></span></span></span>
+<span class="st_twitter_large" displaytext="Tweet" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/twitter_32.png&quot;);"></span></span></span>
+<span class="st_googleplus_large" displaytext="Google +" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/googleplus_32.png&quot;);"></span></span></span>
+<span class="st_linkedin_large" displaytext="LinkedIn" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/linkedin_32.png&quot;);"></span></span></span>
+<span class="st_blogger_large" displaytext="Blogger" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/blogger_32.png&quot;);"></span></span></span>
+<span class="st_pinterest_large" displaytext="Pinterest" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/pinterest_32.png&quot;);"></span></span></span>
+<span class="st_sina_large" displaytext="Sina" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/sina_32.png&quot;);"></span></span></span>
+<span class="st_email_large" displaytext="Email" st_processed="yes"><span style="text-decoration:none;color:#000000;display:inline-block;cursor:pointer;" class="stButton"><span class="stLarge" style="background-image: url(&quot;https://ws.sharethis.com/images/2017/email_32.png&quot;);"></span></span></span>
+
+<script type="text/javascript" id="async-buttons" src="./Ceph BlueStore_files/async-buttons.js.下载"></script><script type="text/javascript">var switchTo5x=true;</script>
+<script type="text/javascript" src="./Ceph BlueStore_files/buttons.js.下载"></script>
+<script type="text/javascript">stLight.options({publisher: "e77610b9-8bf7-45ab-bf4a-758603202e2f", doNotHash: false, doNotCopy: false, hashAddressBar: false});</script>
+<!-- sharethis Button END -->
+
+<br>
+<br>
+
+<div id="related">
+  <h2>Random Posts</h2>
+  <ul class="posts">
+    
+      <li><span>27 Feb 2018</span> » <a href="http://blog.wjin.org/posts/ceph-bluestore-cache.html">Ceph BlueStore Cache</a></li>
+    
+      <li><span>06 Feb 2018</span> » <a href="http://blog.wjin.org/posts/ceph-bluestore-allocator.html">Ceph BlueStore Allocator</a></li>
+    
+      <li><span>05 Feb 2018</span> » <a href="http://blog.wjin.org/posts/ceph-bluestore-freelistmanager.html">Ceph BlueStore FreelistManager</a></li>
+    
+      <li><span>26 Jan 2018</span> » <a href="http://blog.wjin.org/posts/ceph-mds-behind-on-trimming-error.html">Ceph MDS Behind On Trimming Error</a></li>
+    
+      <li><span>25 Jan 2018</span> » <a href="http://blog.wjin.org/posts/ceph-bluestore-bluefs.html">Ceph BlueStore BlueFS</a></li>
+    
+  </ul>
+</div>
+<div id="disqus_thread"><iframe id="dsq-app5317" name="dsq-app5317" allowtransparency="true" frameborder="0" scrolling="no" tabindex="0" title="Disqus" width="100%" src="./Ceph BlueStore_files/saved_resource(1).html" horizontalscrolling="no" verticalscrolling="no" style="height: 395px !important;"></iframe></div>
+<script type="text/javascript">
+    
+    var disqus_shortname = 'wjin';
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = 'http://' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+
+
+	  <div id="footer">
+  Powered by <a href="https://github.com/mojombo/jekyll">Jekyll</a> and <a href="http://twitter.github.com/bootstrap/">Bootstrap</a>.  Last updated at 2019-04-09 03:04:55 +0000.
+</div>
+
+	</div>
+	<script src="http://ajax.lug.ustc.edu.cn/ajax/libs/jquery/1.7.1/jquery.min.js"></script>
+	<script src="./Ceph BlueStore_files/app.js.下载"></script>
+	<script type="text/javascript">
+
+
+  var _gaq = _gaq || [];
+  _gaq.push(['_setAccount', 'UA-138008892-1']);
+  _gaq.push(['_trackPageview']);
+
+
+  (function() {
+    var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+    ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+    var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+  })();
+
+
+</script>
+
+      
+
+<iframe src="./Ceph BlueStore_files/portal-v2.html" id="st_gdpr_iframe" title="GDPR Consent Management" style="width: 0px; height: 0px; position: absolute; left: -5000px;"></iframe><iframe style="display: none;" src="./Ceph BlueStore_files/saved_resource(2).html"></iframe><div id="stcpDiv" style="position: absolute; top: -1999px; left: -1988px;">ShareThis Copy and Paste</div><div id="stwrapper" class="stwrapper stwrapper5x stwrapper5x" style="display: none;"><iframe allowtransparency="true" id="stLframe" class="stLframe" name="stLframe" frameborder="0" scrolling="no" src="./Ceph BlueStore_files/index.html"></iframe></div><div id="stOverlay" onclick="javascript:stWidget.closeWidget();"></div></body></html>
